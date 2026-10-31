@@ -44,7 +44,7 @@ jobs:
           EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" \
             --display-name "$NAME" \
             --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
-          if [ "$EXISTING" != "0" ]; then
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "0" ]; then
             echo "$NAME pehle se mojood hai, skip."
             exit 0
           fi
