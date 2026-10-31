@@ -1,0 +1,76 @@
+name: oci-retry
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: oci-retry
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Install OCI CLI
+        run: pip install oci-cli
+
+      - name: Configure
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_USER"
+            echo "fingerprint=$OCI_FINGERPRINT"
+            echo "tenancy=$OCI_TENANCY"
+            echo "region=ap-singapore-1"
+            echo "key_file=$HOME/.oci/key.pem"
+          } > ~/.oci/config
+
+      - name: Try to launch
+        env:
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_SSH_PUB: ${{ secrets.OCI_SSH_PUB }}
+        run: |
+          NAME="codezy-cloud"
+          EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" \
+            --display-name "$NAME" \
+            --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
+          if [ "$EXISTING" != "0" ]; then
+            echo "$NAME pehle se mojood hai, skip."
+            exit 0
+          fi
+
+          IMAGE=$(oci compute image list --compartment-id "$OCI_TENANCY" \
+            --operating-system "Canonical Ubuntu" --operating-system-version "22.04" \
+            --shape VM.Standard.A1.Flex \
+            --query 'data[?contains("display-name",`2026.10.27-0`)] | [0].id' --raw-output)
+          if [ -z "$IMAGE" ] || [ "$IMAGE" = "null" ]; then
+            IMAGE=$(oci compute image list --compartment-id "$OCI_TENANCY" \
+              --operating-system "Canonical Ubuntu" --operating-system-version "22.04" \
+              --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
+              --query 'data[0].id' --raw-output)
+          fi
+
+          printf '%s\n' "$OCI_SSH_PUB" > key.pub
+          oci compute instance launch \
+            --compartment-id "$OCI_TENANCY" \
+            --availability-domain "VZDa:AP-SINGAPORE-1-AD-1" \
+            --shape VM.Standard.A1.Flex \
+            --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+            --image-id "$IMAGE" \
+            --subnet-id "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaakdcxfuqliuu7bxglcerqlc5maxoxvyigagqrochcbew3fmcuvs2q" \
+            --assign-public-ip true \
+            --assign-private-dns-record true \
+            --is-pv-encryption-in-transit-enabled true \
+            --display-name "$NAME" \
+            --ssh-authorized-keys-file key.pub \
+          || echo "Is baar capacity nahi mili, agli baar dobara try hoga."
