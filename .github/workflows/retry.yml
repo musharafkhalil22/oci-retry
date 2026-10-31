@@ -1,7 +1,7 @@
 name: oci-retry
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "23 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -11,7 +11,7 @@ concurrency:
 jobs:
   launch:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 340
     steps:
       - name: Install OCI CLI
         run: pip install oci-cli
@@ -35,19 +35,15 @@ jobs:
             echo "key_file=$HOME/.oci/key.pem"
           } > ~/.oci/config
 
-      - name: Try to launch
+      - name: Retry launch loop
         env:
           OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
           OCI_SSH_PUB: ${{ secrets.OCI_SSH_PUB }}
+          SUPPRESS_LABEL_WARNING: "True"
+          OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
         run: |
           NAME="codezy-cloud"
-          EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" \
-            --display-name "$NAME" \
-            --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "0" ]; then
-            echo "$NAME pehle se mojood hai, skip."
-            exit 0
-          fi
+          printf '%s\n' "$OCI_SSH_PUB" > key.pub
 
           IMAGE=$(oci compute image list --compartment-id "$OCI_TENANCY" \
             --operating-system "Canonical Ubuntu" --operating-system-version "22.04" \
@@ -59,18 +55,38 @@ jobs:
               --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
               --query 'data[0].id' --raw-output)
           fi
+          echo "Image: $IMAGE"
 
-          printf '%s\n' "$OCI_SSH_PUB" > key.pub
-          oci compute instance launch \
-            --compartment-id "$OCI_TENANCY" \
-            --availability-domain "VZDa:AP-SINGAPORE-1-AD-1" \
-            --shape VM.Standard.A1.Flex \
-            --shape-config '{"ocpus":1,"memoryInGBs":6}' \
-            --image-id "$IMAGE" \
-            --subnet-id "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaakdcxfuqliuu7bxglcerqlc5maxoxvyigagqrochcbew3fmcuvs2q" \
-            --assign-public-ip true \
-            --assign-private-dns-record true \
-            --is-pv-encryption-in-transit-enabled true \
-            --display-name "$NAME" \
-            --ssh-authorized-keys-file key.pub \
-          || echo "Is baar capacity nahi mili, agli baar dobara try hoga."
+          END=$((SECONDS + 19800))
+          while [ $SECONDS -lt $END ]; do
+            echo "$(date -u) - trying..."
+
+            EXISTING=$(oci compute instance list --compartment-id "$OCI_TENANCY" \
+              --display-name "$NAME" \
+              --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output 2>/dev/null || echo "")
+            if [ -n "$EXISTING" ] && [ "$EXISTING" != "0" ]; then
+              echo "$NAME ban chuka hai. Kaam khatam."
+              exit 0
+            fi
+
+            OUT=$(oci compute instance launch \
+              --compartment-id "$OCI_TENANCY" \
+              --availability-domain "VZDa:AP-SINGAPORE-1-AD-1" \
+              --shape VM.Standard.A1.Flex \
+              --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+              --image-id "$IMAGE" \
+              --subnet-id "ocid1.subnet.oc1.ap-singapore-1.aaaaaaaakdcxfuqliuu7bxglcerqlc5maxoxvyigagqrochcbew3fmcuvs2q" \
+              --assign-public-ip true \
+              --assign-private-dns-record true \
+              --is-pv-encryption-in-transit-enabled true \
+              --display-name "$NAME" \
+              --ssh-authorized-keys-file key.pub 2>&1 || true)
+
+            if echo "$OUT" | grep -q '"lifecycle-state"'; then
+              echo "SUCCESS! $NAME ban gaya."
+              exit 0
+            fi
+            echo "$OUT" | grep -iE '"message"|"code"' || echo "$OUT" | tail -3
+            sleep 150
+          done
+          echo "Is run ka time khatam, agla run dobara try karega."
